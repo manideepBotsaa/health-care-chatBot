@@ -1,5 +1,5 @@
 // Supabase Edge Function: healthchat
-// Proxies chat to Perplexity API with healthcare safety guardrails
+// Proxies chat to Gemini API with healthcare safety guardrails
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 
@@ -15,35 +15,52 @@ serve(async (req: Request) => {
 
   try {
     const { messages = [] } = await req.json().catch(() => ({ messages: [] }));
-    const apiKey = Deno.env.get("PERPLEXITY_API_KEY");
+    const apiKey = Deno.env.get("GEMINI_API_KEY");
 
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: "Missing Perplexity API key" }), {
+      return new Response(JSON.stringify({ error: "Missing Gemini API key" }), {
         headers: { "Content-Type": "application/json", ...corsHeaders },
         status: 400,
       });
     }
 
-    const system = {
-      role: "system",
-      content:
-        "You are Serene, a healthcare assistant. Provide concise, empathetic, evidence-informed guidance. Include brief disclaimers when advice could impact safety. Never replace professional medical care. Encourage consulting a clinician when appropriate.",
-    };
+    const systemPrompt = "You are Serene, a healthcare assistant. Provide concise, empathetic, evidence-informed guidance. Include brief disclaimers when advice could impact safety. Never replace professional medical care. Encourage consulting a clinician when appropriate.";
 
-    const response = await fetch("https://api.perplexity.ai/chat/completions", {
+    // Convert messages to Gemini format
+    const geminiMessages = messages.map((msg: any) => ({
+      role: msg.role === "assistant" ? "model" : "user",
+      parts: [{ text: msg.content }]
+    }));
+
+    // Add system prompt as first user message if no messages exist
+    if (geminiMessages.length === 0) {
+      geminiMessages.unshift({
+        role: "user",
+        parts: [{ text: systemPrompt }]
+      });
+    } else {
+      // Prepend system prompt to first user message
+      geminiMessages[0].parts[0].text = systemPrompt + "\n\n" + geminiMessages[0].parts[0].text;
+    }
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "llama-3.1-sonar-small-128k-online",
-        messages: [system, ...messages],
-        temperature: 0.2,
-        top_p: 0.9,
-        max_tokens: 800,
-        frequency_penalty: 1,
-        presence_penalty: 0,
+        contents: geminiMessages,
+        generationConfig: {
+          temperature: 0.2,
+          topP: 0.9,
+          maxOutputTokens: 800,
+        },
+        safetySettings: [
+          {
+            category: "HARM_CATEGORY_MEDICAL",
+            threshold: "BLOCK_NONE"
+          }
+        ]
       }),
     });
 
@@ -56,7 +73,7 @@ serve(async (req: Request) => {
     }
 
     const data = await response.json();
-    const text = data?.choices?.[0]?.message?.content ?? "Sorry, I couldn't find an answer.";
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "Sorry, I couldn't find an answer.";
 
     return new Response(JSON.stringify({ content: text }), {
       headers: { "Content-Type": "application/json", ...corsHeaders },
